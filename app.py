@@ -282,24 +282,47 @@ def load_json_from_txt_bytes(b: bytes) -> Dict[str, Any]:
         raise
 
 def collect_tasks_nt(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return obj.get("tasks") or []
+    # [FIX] "도구 1"의 간단한 list 형식도 지원
+    if isinstance(obj, dict) and "tasks" in obj:
+        return obj.get("tasks") or []
+    if isinstance(obj, list):
+        return obj # "도구 1" 형식 (List[Task])
+    return []
 
 def iter_skills_nt(obj: Dict[str, Any]):
-    skills = obj.get("skills") or []
-    for item in skills:
-        if isinstance(item, dict) and "skill" in item:
-            s = item.get("skill") or {}
-            name = s.get("name", "")
-            definition = s.get("definition", "")
-            stack = s.get("tech_stack", {})
-            related = item.get("related_tasks") or s.get("related_tasks") or []
-        else:
-            s = item if isinstance(item, dict) else {}
-            name = s.get("name", "")
-            definition = s.get("definition", "")
-            stack = s.get("tech_stack", {})
-            related = s.get("related_tasks") or []
-        yield {"name": name, "definition": definition, "tech_stack": stack, "related_tasks": related}
+    # [FIX] "도구 1"의 간단한 list 형식도 지원
+    
+    # 1. "도구 2"의 복잡한 형식 ({"skills": [...]})
+    if isinstance(obj, dict) and "skills" in obj:
+        skills = obj.get("skills") or []
+        for item in skills:
+            if isinstance(item, dict) and "skill" in item:
+                s = item.get("skill") or {}
+                name = s.get("name", "")
+                definition = s.get("definition", "")
+                stack = s.get("tech_stack", {})
+                related = item.get("related_tasks") or s.get("related_tasks") or []
+            else:
+                s = item if isinstance(item, dict) else {}
+                name = s.get("name", "")
+                definition = s.get("definition", "")
+                stack = s.get("tech_stack", {})
+                related = s.get("related_tasks") or []
+            yield {"name": name, "definition": definition, "tech_stack": stack, "related_tasks": related}
+    
+    # 2. "도구 1"의 간단한 형식 (List[Task])
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict):
+                name = item.get("task_name", "")
+                definition = item.get("task_description", "")
+                stack = item.get("tech_stack", {})
+                related = [] # "도구 1" 형식에는 관련 Task 정보가 없음
+                yield {"name": name, "definition": definition, "tech_stack": stack, "related_tasks": related}
+    
+    # 3. 그 외 (빈 값 반환)
+    else:
+        return
 
 def normalize_list(val) -> List[str]:
     if val is None:
@@ -320,13 +343,27 @@ def extract_tech_lines_nt(tech_stack: Dict[str, Any]) -> str:
     if not isinstance(tech_stack, dict):
         tech_stack = {}
     lower_map = {str(k).lower(): v for k, v in tech_stack.items()}
+    
+    # "도구 2" 형식 키
     languages = normalize_list(lower_map.get("language") or lower_map.get("languages"))
     os_list   = normalize_list(lower_map.get("os") or lower_map.get("platform") or lower_map.get("operating_system"))
     tools     = normalize_list(lower_map.get("tools") or lower_map.get("tool"))
+
+    # [FIX] "도구 1"의 추가 키 지원 (audio, data, etc)
+    # (languages, tools는 겹치므로 위에서 이미 처리됨)
+    audio = normalize_list(lower_map.get("audio_processing") or lower_map.get("audio"))
+    data = normalize_list(lower_map.get("data_handling") or lower_map.get("data"))
+    etc = normalize_list(lower_map.get("etc"))
+
     lines = []
     if languages: lines.append(f"* language: {', '.join(languages)}")
     if os_list:   lines.append(f"* os: {', '.join(os_list)}")
     if tools:     lines.append(f"* tools: {', '.join(tools)}")
+    # [FIX] "도구 1" 키 추가
+    if audio:     lines.append(f"* audio_processing: {', '.join(audio)}")
+    if data:      lines.append(f"* data_handling: {', '.join(data)}")
+    if etc:       lines.append(f"* etc: {', '.join(etc)}")
+    
     return strip_markers("\n".join(lines))  # ← 마커 제거
 
 def bullet_lines(items: List[str]) -> str:
@@ -354,13 +391,20 @@ def build_workbook_nontrack(template_bytes: bytes, org: str, role: str, data: Di
     # Task
     set_text(ws_task, "B1", org) # B1, B2는 VBA 수정 함수에서 한글 교정됨
     set_text(ws_task, "B2", role)
+    
+    # [FIX] 유연해진 파서 사용
     tasks = collect_tasks_nt(data)
+    
     task_id_to_name = {}
     for t in tasks:
         tid = str(t.get("task_id") or "").strip()
         tname = str(t.get("task_name") or "").strip()
+        # [FIX] "도구 1" 형식을 위해, task_name도 맵에 추가 (related_tasks 조회용)
+        if tname:
+            task_id_to_name[tname] = tname
         if tid and tname:
             task_id_to_name[tid] = tname
+            
     row = TASK_START_ROW_NT
     for t in tasks[: (TASK_END_ROW_NT - TASK_START_ROW_NT + 1) ]:
         set_text(ws_task, f"A{row}", str(t.get("task_name") or "").strip())
@@ -374,6 +418,8 @@ def build_workbook_nontrack(template_bytes: bytes, org: str, role: str, data: Di
     set_text(ws_skill, "B2", role)
     processed = 0
     max_rows = SKILL_END_ROW_NT - SKILL_START_ROW_NT + 1
+    
+    # [FIX] 유연해진 파서 사용 (list(..)로 제너레이터 실행)
     for s in iter_skills_nt(data):
         if processed >= max_rows: break
         r = SKILL_START_ROW_NT + processed
@@ -616,8 +662,9 @@ def build_workbook_track(template_bytes: bytes, org: str, job: str, data: Dict[s
                 tracks.append({"index": idx, "name": tn, "code": tc})
                 seen.add((tn, tc)); idx += 1
 
-    all_tasks  = data.get("tasks")  or []
-    all_skills = data.get("skills") or []
+    # [FIX] 유연해진 파서 사용
+    all_tasks  = collect_tasks_nt(data)
+    all_skills = list(iter_skills_nt(data)) # 제너레이터 실행
 
     for tr in tracks:
         t_idx = tr["index"]; t_name = tr["name"]; t_code = tr.get("code")
